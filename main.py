@@ -1,11 +1,12 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
-from sklearn.cluster import KMeans
 import plotly.express as px
+from sklearn.cluster import KMeans
+from sklearn.preprocessing import StandardScaler
+import os
 
-# 1. 브라우저 탭 설정 및 앱 제목 구성
+# 1. 브라우저 탭 설정 및 앱 제목 구성 (아이콘 지정)
 st.set_page_config(
     page_title="영화 유형 나누기",
     page_icon="🎬",
@@ -14,154 +15,153 @@ st.set_page_config(
 
 st.title("🎬 영화 유형 나누기 앱")
 
-# 2. 데이터 불러오기 (인코딩 UTF-8)
+# 2. 데이터 불러오기 경로 설정 (로컬 파일 및 온라인 예비 경로 지정)
+LOCAL_FILE = "kobis_movies.csv"
+REMOTE_URL = "https://githubusercontent.com"
+
 @st.cache_data
 def load_data():
-    url = "https://githubusercontent.com"
-    df = pd.read_csv(url, encoding="utf-8")
-    return df
+    # 로컬 폴더에 파일이 있으면 로컬에서 먼저 읽어옴 (네트워크 오류 방지)
+    if os.path.exists(LOCAL_FILE):
+        return pd.read_csv(LOCAL_FILE, encoding="utf-8")
+    else:
+        # 로컬에 파일이 없으면 온라인에서 가져옴
+        return pd.read_csv(REMOTE_URL, encoding="utf-8")
 
 try:
     df_raw = load_data()
-except Exception as e:
-    st.error(f"데이터를 불러오는 중 오류가 발생했습니다: {e}")
-    st.stop()
-
-# 3. 데이터 전처리 및 파생 속성 생성
-df = df_raw.copy()
-
-# 네 속성 중 값이 없거나 첫 주 관객이 0인 영화 필터링
-df = df.dropna(subset=['first_scrn', 'total_audi', 'days_in_top10', 'first_week_audi'])
-df = df[df['first_week_audi'] > 0]
-
-# 상용로그 및 롱런 지수 생성
-df['log_first_scrn'] = np.log10(df['first_scrn'])
-df['log_total_audi'] = np.log10(df['total_audi'])
-df['long_run_idx'] = (df['total_audi'] / df['first_week_audi']).clip(upper=20)
-
-# 전체 편수와 묶은 편수를 화면에 한 줄로 출력
-total_count = len(df_raw)
-filtered_count = len(df)
-st.info(f"📊 전체 편수: {total_count}편 | 묶은 편수: {filtered_count}편")
-
-# 4. 속성 선택 UI (둘 이상 고르게 하고 기본은 네 개 다 선택)
-features_map = {
-    "스크린 수 (상용로그)": "log_first_scrn",
-    "누적 관객 (상용로그)": "log_total_audi",
-    "10위권 일수": "days_in_top10",
-    "롱런 지수": "long_run_idx"
-}
-
-selected_labels = st.multiselect(
-    "묶는 데 사용할 속성을 골라주세요 (2개 이상 선택):",
-    options=list(features_map.keys()),
-    default=list(features_map.keys())
-)
-
-if len(selected_labels) < 2:
-    st.warning("⚠️ 속성을 둘 이상 선택해야 K-평균 분석을 진행할 수 있습니다.")
-    st.stop()
-
-selected_features = [features_map[label] for label in selected_labels]
-
-# 5. 데이터 표준화 및 K-Means 군집화 (세 묶음, 난수 고정)
-X = df[selected_features]
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-kmeans = KMeans(n_clusters=3, random_state=42)
-df['cluster_pred'] = kmeans.fit_predict(X_scaled)
-
-# 누적 관객 평균(원래 단위)이 큰 순서대로 ㉮, ㉯, ㉰ 매핑
-cluster_audi_mean = df.groupby('cluster_pred')['total_audi'].mean().sort_values(ascending=False)
-cluster_mapping = {cluster_pred: label for cluster_pred, label in zip(cluster_audi_mean.index, ['㉮', '㉯', '㉰'])}
-df['cluster'] = df['cluster_pred'].map(cluster_mapping)
-
-# 정렬 순서를 ㉮, ㉯, ㉰ 구조로 고정하기 위한 카테고리 정의
-df['cluster'] = pd.Categorical(df['cluster'], categories=['㉮', '㉯', '㉰'], ordered=True)
-
-# 6. 2차원 산점도 (가로축/세로축 속성 선택, 마우스 오버 시 제목 표시)
-st.subheader("📈 2차원 시각화 분포")
-col1, col2 = st.columns(2)
-with col1:
-    xaxis = st.selectbox("가로축 속성 선택:", options=selected_labels, index=0)
-with col2:
-    yaxis = st.selectbox("세로축 속성 선택:", options=selected_labels, index=min(1, len(selected_labels)-1))
-
-fig_2d = px.scatter(
-    df,
-    x=features_map[xaxis],
-    y=features_map[yaxis],
-    color='cluster',
-    color_discrete_map={'㉮': '#EF553B', '㉯': '#636EFA', '㉰': '#00CC96'},
-    category_orders={'cluster': ['㉮', '㉯', '㉰']},
-    hover_name='movieNm',
-    labels={features_map[xaxis]: xaxis, features_map[yaxis]: yaxis, 'cluster': '묶음'},
-    title=f"2D 산점도 분포 ({xaxis} vs {yaxis})"
-)
-st.plotly_chart(fig_2d, use_container_width=True)
-
-# 7. 3차원 산점도 (속성이 3개 미만일 때 안내 문구 처리, 점 작게, 회전 인터랙션, 마우스 오버 제목)
-st.write("---")
-if len(selected_features) >= 3:
-    st.subheader("🪐 3차원 시각화 분포")
-    col3, col4, col5 = st.columns(3)
-    with col3:
-        z_x = st.selectbox("3D X축 속성 선택:", options=selected_labels, index=0, key="3d_x")
-    with col4:
-        z_y = st.selectbox("3D Y축 속성 선택:", options=selected_labels, index=min(1, len(selected_labels)-1), key="3d_y")
-    with col5:
-        z_z = st.selectbox("3D Z축 속성 선택:", options=selected_labels, index=min(2, len(selected_labels)-1), key="3d_z")
+    total_count = len(df_raw)
     
-    fig_3d = px.scatter_3d(
-        df,
-        x=features_map[z_x],
-        y=features_map[z_y],
-        z=features_map[z_z],
-        color='cluster',
-        color_discrete_map={'㉮': '#EF553B', '㉯': '#636EFA', '㉰': '#00CC96'},
-        category_orders={'cluster': ['㉮', '㉯', '㉰']},
-        hover_name='movieNm',
-        labels={features_map[z_x]: z_x, features_map[z_y]: z_y, features_map[z_z]: z_z, 'cluster': '묶음'},
-        title="3D 공간 산점도 분포 (드래그로 회전 가능)"
+    # 3. 데이터 전처리 및 예외 처리
+    # 필수 4가지 속성에 결측치가 있거나 첫 주 관객(first_week_audi)이 0인 영화 제외
+    required_cols = ['first_scrn', 'total_audi', 'days_in_top10', 'first_week_audi']
+    df = df_raw.dropna(subset=required_cols).copy()
+    df = df[df['first_week_audi'] > 0].copy()
+    
+    # 속성 변환 및 파생변수 생성
+    df['스크린 수(로그)'] = np.log10(df['first_scrn'])
+    df['누적 관객(로그)'] = np.log10(df['total_audi'])
+    df['10위권 일수'] = df['days_in_top10']
+    
+    # 롱런 지수 생성 후 20 초과 값은 20으로 자르기 (clip)
+    df['롱런 지수'] = df['total_audi'] / df['first_week_audi']
+    df['롱런 지수'] = df['롱런 지수'].clip(upper=20)
+    
+    valid_count = len(df)
+    
+    # 전체 편수와 분석에 사용된 묶은 편수를 화면에 한 줄로 출력
+    st.write(f"📊 **전체 영화 편수:** {total_count}편 | **분석 및 묶음에 사용된 영화 편수:** {valid_count}편")
+    
+    # 4. 분석 속성 선택 컴포넌트 (화면 상단 배치, 기본은 4개 모두 선택)
+    feature_options = ["스크린 수(로그)", "누적 관객(로그)", "10위권 일수", "롱런 지수"]
+    
+    st.subheader("⚙️ 분석 설정")
+    selected_features = st.multiselect(
+        "군집 분석(묶기)에 사용할 속성을 선택하세요 (둘 이상 선택 필수)",
+        options=feature_options,
+        default=feature_options
     )
-    fig_3d.update_traces(marker=dict(size=3))  # 점 작게 세팅
-    st.plotly_chart(fig_3d, use_container_width=True)
-else:
-    st.info("💡 고른 속성이 셋보다 적으면 3차원 산점도를 그릴 수 없습니다. 속성을 3개 이상 선택해 주세요.")
-
-# 8. 묶음별 편수 및 네 속성의 평균(원래 단위) 표 출력
-st.write("---")
-st.subheader("📋 묶음별 통계 리포트 (원래 단위 평균)")
-
-summary_df = df.groupby('cluster', observed=False).agg(
-    편수=('movieNm', 'count'),
-    스크린_수_평균=('first_scrn', 'mean'),
-    누적_관객_평균=('total_audi', 'mean'),
-    십위권_일수_평균=('days_in_top10', 'mean'),
-    롱런_지수_평균=('long_run_idx', 'mean')
-).reset_index()
-
-summary_df.columns = ['묶음', '편수', '스크린 수 평균', '누적 관객 평균', '10위권 일수 평균', '롱런 지수 평균']
-st.dataframe(summary_df.style.format({
-    '편수': '{:,.0f}편',
-    '스크린 수 평균': '{:,.1f}개',
-    '누적 관객 평균': '{:,.1f}명',
-    '10위권 일수 평균': '{:,.1f}일',
-    '롱런 지수 평균': '{:,.2f}'
-}), use_container_width=True)
-
-# 9. 묶음별 누적 관객 상위 5편 영화 제목 나열
-st.subheader("🏆 묶음별 누적 관객 많은 순 Top 5 영화")
-top_cols = st.columns(3)
-
-for idx, label in enumerate(['㉮', '㉯', '㉰']):
-    with top_cols[idx]:
-        st.markdown(f"### 📦 묶음 **{label}**")
-        cluster_movies = df[df['cluster'] == label].sort_values(by='total_audi', ascending=False).head(5)
+    
+    # 2개 이상 선택 검증
+    if len(selected_features) < 2:
+        st.error("⚠️ 속성을 최소 2개 이상 선택해야 분석을 진행할 수 있습니다.")
+    else:
+        # 5. 데이터 표준화 및 K-평균 군집화 (세 묶음)
+        X = df[selected_features]
+        scaler = StandardScaler()
+        X_scaled = scaler.fit_transform(X)
         
-        if not cluster_movies.empty:
-            for rank, row in enumerate(cluster_movies.itertuples(), 1):
-                st.write(f"{rank}. **{row.movieNm}** ({row.total_audi:,}명)")
+        # 재실행 시 결과 고정을 위한 난수 설정 (random_state=42)
+        kmeans = KMeans(n_clusters=3, random_state=42)
+        df['cluster_raw'] = kmeans.fit_predict(X_scaled)
+        
+        # 누적 관객 평균이 큰 묶음부터 ㉮, ㉯, ㉰ 부여
+        cluster_means = df.groupby('cluster_raw')['total_audi'].mean().sort_values(ascending=False)
+        rank_mapping = {raw_idx: label for raw_idx, label in zip(cluster_means.index, ['㉮', '㉯', '㉰'])}
+        df['묶음'] = df['cluster_raw'].map(rank_mapping)
+        
+        # ㉮, ㉯, ㉰ 순서로 데이터 정렬
+        df = df.sort_values(by='묶음')
+        
+        # 6. Plotly 2차원 산점도 시각화
+        st.subheader("📈 2차원 산점도 시각화")
+        col1, col2 = st.columns(2)
+        with col1:
+            x_axis_2d = st.selectbox("2차원 가로축(X) 속성 선택", options=selected_features, index=0)
+        with col2:
+            y_axis_2d = st.selectbox("2차원 세로축(Y) 속성 선택", options=selected_features, index=min(1, len(selected_features)-1))
+            
+        fig_2d = px.scatter(
+            df, 
+            x=x_axis_2d, 
+            y=y_axis_2d, 
+            color='묶음',
+            category_orders={"묶음": ["㉮", "㉯", "㉰"]},
+            hover_name='movieNm',
+            title=f"2차원 산점도: {x_axis_2d} vs {y_axis_2d}",
+            color_discrete_sequence=px.colors.qualitative.Set1
+        )
+        st.plotly_chart(fig_2d, use_container_width=True)
+        
+        # 7. Plotly 3차원 산점도 시각화 (속성이 셋보다 적으면 안내 문구 표시)
+        st.subheader("🥽 3차원 산점도 시각화")
+        if len(selected_features) < 3:
+            st.info("💡 선택된 속성이 3개 미만입니다. 3차원 산점도를 그리려면 위 설정에서 속성을 3개 이상 선택해 주세요.")
         else:
-            st.write("해당 묶음에 조건에 부합하는 영화가 없습니다.")
+            col_x, col_y, col_z = st.columns(3)
+            with col_x:
+                x_axis_3d = st.selectbox("3차원 X축 속성 선택", options=selected_features, index=0)
+            with col_y:
+                y_axis_3d = st.selectbox("3차원 Y축 속성 선택", options=selected_features, index=1)
+            with col_z:
+                z_axis_3d = st.selectbox("3차원 Z축 속성 선택", options=selected_features, index=2)
+                
+            fig_3d = px.scatter_3d(
+                df,
+                x=x_axis_3d,
+                y=y_axis_3d,
+                z=z_axis_3d,
+                color='묶음',
+                category_orders={"묶음": ["㉮", "㉯", "㉰"]},
+                hover_name='movieNm',
+                title=f"3차원 산점도: {x_axis_3d} x {y_axis_3d} x {z_axis_3d}",
+                color_discrete_sequence=px.colors.qualitative.Set1
+            )
+            fig_3d.update_traces(marker=dict(size=4))  # 마우스 회전이 원활하도록 점 크기를 작게 조절
+            st.plotly_chart(fig_3d, use_container_width=True)
+            
+        # 8. 묶음별 통계 표 출력 (원래 단위 기준)
+        st.subheader("📋 묶음별 요약 통계 및 대표 영화")
+        
+        stat_df = df.groupby('묶음').agg(
+            편수=('movieCd', 'count'),
+            스크린수_평균=('first_scrn', 'mean'),
+            누적관객_평균=('total_audi', 'mean'),
+            _10위권일수_평균=('days_in_top10', 'mean'),
+            롱런지수_평균=('롱런 지수', 'mean')
+        ).reset_index()
+        
+        stat_df.columns = ['묶음', '편수', '스크린 수 평균', '누적 관객 평균', '10위권 일수 평균', '롱런 지수 평균']
+        st.dataframe(stat_df.style.format({
+            '스크린 수 평균': '{:,.1f}',
+            '누적 관객 평균': '{:,.1f}',
+            '10위권 일수 평균': '{:,.1f}',
+            '롱런 지수 평균': '{:,.2f}'
+        }), use_container_width=True)
+        
+        # 9. 묶음별 누적 관객 많은 순 top 5 영화 제목 출력
+        st.write("🔝 **묶음별 누적 관객 상위 5편 영화**")
+        cols_clusters = st.columns(3)
+        
+        for idx, cluster_label in enumerate(['㉮', '㉯', '㉰']):
+            with cols_clusters[idx]:
+                st.markdown(f"### 묶음 {cluster_label}")
+                cluster_movies = df[df['묶음'] == cluster_label].sort_values(by='total_audi', ascending=False).head(5)
+                if not cluster_movies.empty:
+                    for rank, row in enumerate(cluster_movies.itertuples(), 1):
+                        st.write(f"{rank}. **{row.movieNm}** ({row.total_audi:,}명)")
+                else:
+                    st.write("해당 묶음에 영화가 존재하지 않습니다.")
+
+except Exception as e:
+    st.error(f"데이터 로드 또는 분석 과정 중 오류가 발생했습니다: {e}")
